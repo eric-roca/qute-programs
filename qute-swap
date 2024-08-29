@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+SwapForQute
+This script is designed to manipulate and redirect URLs in Qutebrowser based on a provided
+configuration file.
+The main function, main, takes parsed command line arguments and processes the URL manipulation and
+redirection accordingly.
+
+The script includes the following functions:
+
+add_new_rule_to_config: Adds a new rule to the configuration file based on the provided URL.
+handle_wikipedia_url: Modifies Wikipedia URLs by adding or replacing the 'useskin' parameter.
+rewrite_url: Rewrites the URL components based on the provided replacement URL.
+replace_url_components: Replaces URL components based on the configuration file.
+The script also defines the WIKIPEDIA_REGEX constant, which is used to match Wikipedia URLs.
+
+To use the script, pass the required command line arguments and execute the script.
+The script supports adding new rules, manipulating URLs, and writing the modified URLs to
+Qutebrowser's FIFO.
+"""
+
+import os
+import json
+import argparse
+import logging
+import re
+from urllib.parse import urlparse, parse_qs, urlencode, ParseResult
+from os.path import expanduser
+
+WIKIPEDIA_REGEX = r'^(?:https?://)?([a-z]{2,}?)\.wikipedia\.org(?:/wiki/.*)?$'
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def add_new_rule_to_config(url: str, config_file_path: str) -> None:
+    """
+    Add a new rule to the configuration file.
+
+    :param url: The input URL for which the rule is being added.
+    :param config_file_path: The path to the configuration file.
+    """
+    # Remove "www." prefix from the input URL's netloc
+    url = str(url)
+    url_netloc = url.replace('www.', '')
+
+    # Prompt the user for a new rule with dmenu
+    try:
+        dmenu_command = f"echo '' | dmenu -p 'Enter a new rule for {url_netloc}:'"
+        new_rule = os.popen(dmenu_command).read().strip()
+        if not new_rule:
+            return
+
+        # Parse the user input as JSON and update the configuration file
+        rule_dict = {
+            'out': new_rule,
+            'force_https': True,
+            'clean_queries': True,
+        }
+        logger.debug(rule_dict)
+
+        with open(expanduser(config_file_path), "r+", encoding="utf-8") as config_file:
+            config_data = json.load(config_file)
+            if url_netloc in config_data:
+                logger.info("%s is already in the configuration. Updating values.", url_netloc)
+                config_data[url_netloc].update(rule_dict)
+            else:
+                logger.info("Adding %s to the configuration with values %s.", url_netloc, rule_dict)
+                config_data[url_netloc] = rule_dict
+            config_file.seek(0)
+            json.dump(config_data, config_file, indent=2)
+            config_file.truncate()
+
+    except ValueError as e:
+        logger.error("Invalid input: %s",e)
+
+def handle_wikipedia_url(url: str, skin: str = 'timeless') -> str:
+    """
+    Handle Wikipedia URLs.
+
+    :param url: The input URL to be modified.
+    :return: The modified URL, adding a specific userskin
+    """
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    query_params['useskin'] = [skin]
+    new_query = urlencode(query_params, doseq=True)
+
+    return parsed_url._replace(query=new_query).geturl()
+
+def rewrite_url(url: ParseResult, replacement_url: str) -> str:
+    """
+    Rewrite the URL using the replacement URL.
+
+    :param url: The input URL to be modified.
+    :param replacement_url: The replacement URL.
+    :return: The modified URL.
+    """
+    if replacement_url == 'antifandom.com':
+        subdomain_match = re.match(r"^(?P<subdomain>.*?)\.fandom\.com$", url.netloc)
+        if subdomain_match:
+            subdomain = subdomain_match.group('subdomain')
+            return url._replace(netloc=replacement_url, path = f"/{subdomain}{url.path}").geturl()
+
+    return url._replace(netloc=replacement_url).geturl()
+
+
+def replace_url_components(url: str, config_file_path: str) -> str:
+    """
+    Replace URL components based on the configuration file.
+
+    :param url: The input URL to be modified.
+    :param config_file_path: The path to the configuration file.
+    :return: The modified URL.
+    """
+
+    # Add or replace skin parameter for Wikipedia URLs
+    if re.match(WIKIPEDIA_REGEX, url):
+        return handle_wikipedia_url(url)
+
+    # Parse the input URL
+    parsed_url = urlparse(url)
+
+    # Strip Google redirect prefix
+    if url.startswith("https://www.google.com/url?q="):
+        url = url[len("https://www.google.com/url?q="):]
+
+    # Parse the input URL
+    parsed_url = urlparse(url)
+
+    # Read JSON configuration from file
+    with open(expanduser(config_file_path), "r", encoding="utf-8") as config_file:
+        config_data = json.load(config_file)
+
+    # Replace URL components according to the configuration
+    for pattern, configuration in config_data.items():
+        if re.search(pattern, parsed_url.netloc):
+
+            # Append URL, useful for archive.is
+            if configuration.get('prepend'):
+                logger.debug(parsed_url.geturl())
+                prepend = configuration['out']
+                parsed_url = parsed_url._replace(netloc=prepend,
+                                                 path=f"/{parsed_url.netloc}{parsed_url.path}")
+
+            # Replace http scheme with https
+            if configuration.get('force_https'):
+                parsed_url = parsed_url._replace(scheme='https')
+
+            # Delete queries
+            if configuration.get('clean_queries'):
+                parsed_url = parsed_url._replace(query='')
+
+            # Delete fragments
+            if configuration.get('clean_fragments'):
+                parsed_url = parsed_url._replace(fragment='')
+
+            # Rewrite subdomain.fandom.com URLs if necessary
+            replacement_url = configuration.get('out')
+            if replacement_url is not None:
+                return rewrite_url(parsed_url, replacement_url)
+
+    return url
+
+def main(args):
+    """
+    Main function for handling URL manipulation and configuration.
+
+    This script is used to manipulate URLs based on the provided configuration file and user input.
+
+    :param args: The parsed command line arguments.
+    """
+    config_file_path = args.conf
+    # Prompt for a new rule based on the current URL
+    if args.add:
+        add_new_rule_to_config(urlparse(args.url).netloc, config_file_path)
+    else:
+        with open(os.environ["QUTE_FIFO"], "a", encoding="utf-8") as output_fifo:
+            output_fifo.write(f"{args.cmd} {replace_url_components(args.url, config_file_path)}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        prog='swapforqute',
+        description='Redirect and clean URLs in qutebrowser',
+        epilog='...',
+    )
+    parser.add_argument('-u', '--url', help='URL that must be checked and maybe changed')
+    parser.add_argument('--cmd', help="Write Qutebrowser's command")
+    parser.add_argument('-c', '--conf', help='Path to config.json file')
+    parser.add_argument('-a', '--add', action='store_true', help='Add a new rule')
+    parsed_args = parser.parse_args()
+
+    main(parsed_args)

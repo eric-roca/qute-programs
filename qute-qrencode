@@ -1,0 +1,3 @@
+#!/bin/bash
+
+qrencode -o - $QUTE_URL | feh -
