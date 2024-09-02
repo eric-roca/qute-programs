@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# A script to play youtube videos using mpv
+# Pass the youtube link as argument
+
+if [ $# -eq 0 ]; then
+    echo "No URL supplied"
+    echo "Sintax: youtube-play [youtube url]"
+    exit 1
+fi
+
+url=$1
+
+# Detect screen resolution
+resolution=$(xrandr --current | grep '*' | uniq | awk '{print $1}' | cut -d 'x' -f2)
+
+# Verify network
+interface=$(iw dev | grep -Eo "wlp.*")
+network=$(iw dev $interface link | grep SSID | cut -d ':' -f2 | sed 's/^ //g')
+
+case "$network" in
+    Bbox-908ACE6B)
+        fast=1 ;;
+    eduroam)
+        fast=1 ;;
+    *) ;;
+esac 
+
+if [ ! -z $fast ] && [ "$resolution" = "2160" ]; then
+    height=2160
+else
+    height=1080
+fi
+
+echo ""
+echo "Height: $height"
+echo "Network: $network"
+echo "Fast: $fast"
+echo "Resolution: $resolution"
+
+mpv \
+    --hwdec=auto \
+    --ytdl-raw-options=cookies=/home/eric/.config/yt-dlp/cookies.txt,mark-watched=,format="bestvideo[height<=?${height}]+bestaudio/best",no-sponsorblock= \
+    "$url"
